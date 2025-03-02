@@ -3,7 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
-	"github.com/kokardy/go-echo-server/internal/server"
+	"github.com/kokardy/http-echo-server/internal/server"
 	"os"
 )
 

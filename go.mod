@@ -1,4 +1,4 @@
-module github.com/kokardy/go-echo-server
+module github.com/kokardy/http-echo-server
 
 go 1.24.0
 
