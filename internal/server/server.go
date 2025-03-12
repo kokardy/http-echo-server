@@ -1,11 +1,15 @@
 package server
 
 import (
+	"compress/gzip"
+	"compress/zlib"
 	"encoding/json"
 	"fmt"
+	"github.com/andybalholm/brotli"
 	"github.com/gin-gonic/gin"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -61,6 +65,35 @@ func (s *Server) echoHandler(c *gin.Context) {
 		"timestamp": time.Now().Format(time.RFC3339),
 	}
 
+	// Determine the accepted encoding
+	acceptEncoding := c.GetHeader("Accept-Encoding")
+	var writer io.Writer = c.Writer
+	var closer io.Closer
+	var encoding string
+
+	if strings.Contains(acceptEncoding, "br") {
+		encoding = "br"
+		brWriter := brotli.NewWriter(c.Writer)
+		writer = brWriter
+		closer = brWriter
+	} else if strings.Contains(acceptEncoding, "gzip") {
+		encoding = "gzip"
+		gzipWriter := gzip.NewWriter(c.Writer)
+		writer = gzipWriter
+		closer = gzipWriter
+	} else if strings.Contains(acceptEncoding, "deflate") {
+		encoding = "deflate"
+		zlibWriter := zlib.NewWriter(c.Writer)
+		writer = zlibWriter
+		closer = zlibWriter
+	}
+
+	if encoding != "" {
+		defer closer.Close()
+		c.Header("Content-Encoding", encoding)
+		fmt.Printf("Response Content-Encoding: %s\n", encoding)
+	}
+
 	// Stream the response
 	c.Stream(func(w io.Writer) bool {
 		// Marshal the metadata part
@@ -76,19 +109,39 @@ func (s *Server) echoHandler(c *gin.Context) {
 		if err != nil {
 			return false
 		}
-		fmt.Fprintf(w, `{"metadata": %s, "path": "%s", "headers": %s, "query_params": %s, "body_chunks": [`, metaJSON, c.Request.URL.Path, headersJSON, queryParamsJSON)
+		fmt.Fprintf(writer, `{"metadata": %s, "path": "%s", "headers": %s, "query_params": %s, "body_chunks": [`, metaJSON, c.Request.URL.Path, headersJSON, queryParamsJSON)
 
 		// If there's a body, stream it in chunks
 		if c.Request.Body != nil {
+			var reader io.ReadCloser
+			contentEncoding := c.GetHeader("Content-Encoding")
+			switch contentEncoding {
+			case "gzip":
+				reader, err = gzip.NewReader(c.Request.Body)
+			case "deflate":
+				reader, err = zlib.NewReader(c.Request.Body)
+			case "br":
+				reader = io.NopCloser(brotli.NewReader(c.Request.Body))
+			default:
+				reader = c.Request.Body
+			}
+			if err != nil {
+				return false
+			}
+			defer reader.Close()
+
+			// Log the content encoding
+			fmt.Printf("Request Content-Encoding: %s\n", contentEncoding)
+
 			buffer := make([]byte, 4096) // 4KB chunks
 			bodyPartCount := 0
 			firstChunk := true
 
 			for {
-				n, err := c.Request.Body.Read(buffer)
+				n, err := reader.Read(buffer)
 				if n > 0 {
 					if !firstChunk {
-						fmt.Fprint(w, ",")
+						fmt.Fprint(writer, ",")
 					}
 					firstChunk = false
 
@@ -103,7 +156,7 @@ func (s *Server) echoHandler(c *gin.Context) {
 						break
 					}
 
-					fmt.Fprintf(w, "%s", bodyJSON)
+					fmt.Fprintf(writer, "%s", bodyJSON)
 					bodyPartCount++
 				}
 
@@ -118,14 +171,14 @@ func (s *Server) echoHandler(c *gin.Context) {
 						"error": err.Error(),
 					}
 					errJSON, _ := json.Marshal(errMsg)
-					fmt.Fprintf(w, `,{"error": %s}`, errJSON)
+					fmt.Fprintf(writer, `,{"error": %s}`, errJSON)
 					break
 				}
 			}
 		}
 
 		// Close the body_chunks array and the JSON object
-		fmt.Fprint(w, "]}")
+		fmt.Fprint(writer, "]}")
 		return false
 	})
 }
